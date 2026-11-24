@@ -1,0 +1,76 @@
+brain-boot-mcp demo (in-memory SQLite, synthetic data, pinned clock)
+seeded: {'rules': 5, 'corrections': 3, 'due_items': 3, 'memories': 5}
+full text search: FTS5
+
+== 1. The agent connects and lists the tools ==
+  boot: Get your boot pack: standing rules, recent human corrections, due items and a pack_id.
+  pack_check: Ask whether your pack is still current.
+  recall: Search stored memories, past corrections and active rules, best match first.
+  propose_rule: Propose a new standing rule. A human must approve it before it enters any pack.
+
+== 2. Session start: boot ==
+pack_id       pk_838c339e0d9dd2f8
+generated_at  2026-01-05T14:00:00Z
+standing_rules
+  [rule:1:v1] (*) Never send a message to a customer until a human has approved the draft.
+  [rule:2:v1] (*) Quote prices only from the current price sheet. If an item is missing, ask.
+  [rule:3:v1] (*) Write dates in full (Tuesday 6 January), never as bare numbers.
+  [rule:4:v1] (ops_agent) Before booking a visit, confirm the address back to the customer.
+recent_corrections
+  [correction:2] 2026-01-05T08:00:00Z The Tuesday slot for Alex Sample was double booked. Check the calendar before offering a time, not after.
+  [correction:1] 2026-01-04T08:00:00Z Stop opening replies with an apology when nothing went wrong.
+due_items
+  [due:1] OVERDUE 2026-01-05T11:00:00Z Call back Jordan Example on 555-0142 about the gutter estimate
+  [due:2] due 2026-01-05T19:00:00Z Send the weekly open jobs summary
+note: the billing only rule, the 40 day old correction and the item due in
+      6 days are in the database but correctly left out of this pack.
+
+== 3. Before an outbound action: pack_check (nothing has changed) ==
+status           UNCHANGED
+current_pack_id  pk_838c339e0d9dd2f8
+instruction      Nothing changed since this pack was issued. Carry on.
+
+== 4. Meanwhile a human corrects the agent and tightens a rule ==
+  human: added a correction for ops_agent
+  human: edited rule 1 (now version 2)
+
+== 5. The next pack_check catches it mid session ==
+status           CHANGED
+current_pack_id  pk_cd4a559679c1f1a8
+  + [correction:4] Do not promise a same day visit. Offer the next open slot instead.
+  + [rule:1:v2] Never send a message to a customer or a supplier until a human has approved the draft.
+  - [rule:1:v1] Never send a message to a customer until a human has approved the draft.
+instruction      Your pack is out of date. Follow the added lines first, stop following the removed lines, then use current_pack_id for later checks.
+
+== 6. The agent adopts the new pack id and checks again ==
+status           UNCHANGED
+current_pack_id  pk_cd4a559679c1f1a8
+instruction      Nothing changed since this pack was issued. Carry on.
+
+== 7. recall: look it up instead of guessing ==
+query: 'how is gutter cleaning priced' -> tokens ['gutter', 'cleaning', 'priced']
+  memory:3       score 6.8348   Gutter cleaning is priced per metre; the minimum charge covers 20 metres.
+query: 'when do invoice reminders go out' -> tokens ['invoice', 'reminders', 'go', 'out']
+  memory:4       score 7.988    Invoice reminders go out 7 and 14 days after the due date, never earlier.
+  memory:5       score 1.6166   Photos of finished work are filed under the job number before the invoice.
+
+== 8. propose_rule: the agent asks, it cannot decide ==
+status pending, proposal_id 1
+message: Recorded as a proposal. It is not a rule and will not appear in any pack until a human approves it.
+same proposal again -> status already_pending
+an existing rule, reworded only by case -> status duplicate_of_rule (rule:3:v1)
+pack_check after proposing -> UNCHANGED (a proposal is not a rule)
+
+== 9. A human approves the proposal; the next check delivers the rule ==
+  human: approved proposal 1 as rule:6:v1
+status           CHANGED
+current_pack_id  pk_9196a835461cd8f7
+  + [rule:6:v1] Send every estimate as a PDF attachment.
+instruction      Your pack is out of date. Follow the added lines first, stop following the removed lines, then use current_pack_id for later checks.
+
+== 10. Bad input is a tool error, not a crash ==
+is_error True: Error executing tool pack_check: pack_id must look like pk_ followed by 16 hex characters
+unknown but well formed id -> UNKNOWN_PACK
+
+receipts written for ops_agent: 4
+demo complete
