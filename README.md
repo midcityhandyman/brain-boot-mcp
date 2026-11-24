@@ -1,7 +1,53 @@
 # brain-boot-mcp
 
-Agents start every session with no memory of the rules a human gave them yesterday, and a long session never notices when those rules change underneath it.
-This is an MCP server that hands any agent a boot pack at session start and can tell it, at any later moment, exactly which lines of that pack have changed.
+[![ci](https://github.com/midcityhandyman/brain-boot-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/midcityhandyman/brain-boot-mcp/actions/workflows/ci.yml)
+
+**Agents stop starting from zero, and stop repeating mistakes a human already corrected.**
+
+An AI agent begins every session with no memory of the instructions it was given yesterday. Correct it in the morning and it, or another agent on the same team, makes the same mistake in the afternoon. A long session never notices when the rules change underneath it.
+
+brain-boot-mcp is a small Model Context Protocol (MCP) server that closes that gap for any MCP client, including Claude Code and Claude Desktop:
+
+- **At session start** the agent calls `boot` and gets its boot pack: the standing rules, the recent human corrections, what is due, and a pack id.
+- **Before anything hard to undo** it calls `pack_check` and is told exactly which lines were added or removed since it booted.
+- **Instead of guessing** it can `recall` stored memory, and it can `propose_rule` when a correction should outlast the session. Only a human can approve a proposal.
+
+It is for anyone running one or more agents on real work who is tired of repeating the same instructions. Python 3.10+, the official MCP Python SDK (v2), SQLite out of the box, Postgres included, 80 tests.
+
+## What you will see
+
+Real output from `python demo/run_demo.py` (synthetic data, pinned clock; the full capture is in [`demo/output.txt`](demo/output.txt)). The pack an agent gets at session start:
+
+```text
+== 2. Session start: boot ==
+pack_id       pk_838c339e0d9dd2f8
+generated_at  2026-01-05T14:00:00Z
+standing_rules
+  [rule:1:v1] (*) Never send a message to a customer until a human has approved the draft.
+  [rule:2:v1] (*) Quote prices only from the current price sheet. If an item is missing, ask.
+  [rule:3:v1] (*) Write dates in full (Tuesday 6 January), never as bare numbers.
+  [rule:4:v1] (ops_agent) Before booking a visit, confirm the address back to the customer.
+recent_corrections
+  [correction:2] 2026-01-05T08:00:00Z The Tuesday slot for Alex Sample was double booked. Check the calendar before offering a time, not after.
+  [correction:1] 2026-01-04T08:00:00Z Stop opening replies with an apology when nothing went wrong.
+due_items
+  [due:1] OVERDUE 2026-01-05T11:00:00Z Call back Jordan Example on 555-0142 about the gutter estimate
+  [due:2] due 2026-01-05T19:00:00Z Send the weekly open jobs summary
+```
+
+Twenty minutes later a human adds a correction and tightens rule 1. The same agent, mid session, checks its pack:
+
+```text
+== 5. The next pack_check catches it mid session ==
+status           CHANGED
+current_pack_id  pk_cd4a559679c1f1a8
+  + [correction:4] Do not promise a same day visit. Offer the next open slot instead.
+  + [rule:1:v2] Never send a message to a customer or a supplier until a human has approved the draft.
+  - [rule:1:v1] Never send a message to a customer until a human has approved the draft.
+instruction      Your pack is out of date. Follow the added lines first, stop following the removed lines, then use current_pack_id for later checks.
+```
+
+All sample data is invented (placeholder people, 555-01xx numbers, example.com addresses).
 
 ## What it does
 
@@ -57,34 +103,61 @@ sequenceDiagram
 ## Run it
 
 ```bash
+git clone https://github.com/midcityhandyman/brain-boot-mcp.git
+cd brain-boot-mcp
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 python -m brain_boot_mcp --db brain.db seed
+python -m brain_boot_mcp --db brain.db boot ops_agent     # print a pack without an MCP client
 python -m brain_boot_mcp --db brain.db serve
 ```
 
-`serve` speaks MCP over stdio, so it waits silently for a client. To attach it to an MCP host, register it like any stdio server:
+`serve` speaks MCP over stdio, so it waits silently for a client; stop it with Ctrl+C. In normal use you do not start it yourself: the host does.
+
+### Connect it to Claude
+
+Hosts start the server from their own working directory with a minimal environment, so use absolute paths and point at the interpreter inside the virtual environment (`.venv/bin/python`, or `.venv\Scripts\python.exe` on Windows).
+
+Claude Code:
+
+```bash
+claude mcp add brain-boot -- /absolute/path/to/brain-boot-mcp/.venv/bin/python -m brain_boot_mcp --db /absolute/path/to/brain.db serve
+claude mcp list
+```
+
+Everything after `--` is the server command. Add `--scope project` to write the entry to a shared `.mcp.json`, or `--scope user` for all your projects. Inside a session, `/mcp` shows the connection.
+
+Claude Desktop: Settings, Developer, Edit Config opens `claude_desktop_config.json`. Add the entry, then quit and reopen the app. The same `mcpServers` block is what a project `.mcp.json` holds.
 
 ```json
 {
   "mcpServers": {
     "brain-boot": {
-      "command": "python",
+      "command": "/absolute/path/to/brain-boot-mcp/.venv/bin/python",
       "args": ["-m", "brain_boot_mcp", "--db", "/absolute/path/to/brain.db", "serve"]
     }
   }
 }
 ```
 
-The human side, from another terminal on the same database:
+On Windows, write the paths with doubled backslashes, for example `"C:\\path\\to\\brain-boot-mcp\\.venv\\Scripts\\python.exe"`.
+
+The server sends instructions telling the agent to boot first and check before risky actions, but a host is free to ignore them. It is more reliable to also put one line in the agent's own instructions (for Claude Code, `CLAUDE.md`): "Call the brain-boot `boot` tool at the start of every session and follow the pack."
+
+### The human side
+
+From another terminal, on the same database:
 
 ```bash
 python -m brain_boot_mcp --db brain.db correct "Offer the next open slot, never same day." --agent ops_agent
 python -m brain_boot_mcp --db brain.db proposals --status pending
 python -m brain_boot_mcp --db brain.db approve 1
-python -m brain_boot_mcp --db brain.db boot ops_agent     # print a pack without an MCP client
 ```
 
-Configuration is by environment variable and every value is optional; see `.env.example`. The default setup has no secrets.
+`proposals` prints nothing and `approve 1` reports "proposal 1 does not exist" until an agent has called `propose_rule`; the seed data contains no proposals.
+
+Configuration is by environment variable and every value is optional; see `.env.example`. The default setup has no secrets. A host does not pass your shell's variables to the server, so set any you need in the `env` field of the server entry.
 
 ### Postgres
 
@@ -93,6 +166,8 @@ pip install -e ".[postgres]"
 psql "$BRAIN_BOOT_PG_DSN" -f sql/001_schema.sql -f sql/002_functions.sql
 BRAIN_BOOT_BACKEND=postgres python -m brain_boot_mcp serve
 ```
+
+`BRAIN_BOOT_PG_DSN` is a normal Postgres connection string (see `.env.example`).
 
 The functions also work with no Python at all:
 
@@ -125,19 +200,7 @@ CI (`.github/workflows/ci.yml`) runs the offline suite and the demo on Python 3.
 python demo/run_demo.py
 ```
 
-One agent session, start to finish, with the real MCP server and the real MCP client in one process, an in-memory database, synthetic data and a pinned clock. No network and no keys. The captured output is in [`demo/output.txt`](demo/output.txt). The middle of it:
-
-```text
-== 5. The next pack_check catches it mid session ==
-status           CHANGED
-current_pack_id  pk_cd4a559679c1f1a8
-  + [correction:4] Do not promise a same day visit. Offer the next open slot instead.
-  + [rule:1:v2] Never send a message to a customer or a supplier until a human has approved the draft.
-  - [rule:1:v1] Never send a message to a customer until a human has approved the draft.
-instruction      Your pack is out of date. Follow the added lines first, stop following the removed lines, then use current_pack_id for later checks.
-```
-
-All sample data is invented (placeholder people, 555-01xx numbers, example.com addresses).
+One agent session, start to finish, with the real MCP server and the real MCP client in one process, an in-memory database, synthetic data and a pinned clock. No network and no keys. It prints ten steps; the excerpts under "What you will see" are steps 2 and 5, and the full capture is in [`demo/output.txt`](demo/output.txt). Step 10 sends bad input on purpose, so the SDK logs one `Tool 'pack_check' failed` line to stderr. That line is expected.
 
 ## How the pack id is computed
 
@@ -182,6 +245,6 @@ This is a clean rewrite of a pattern drawn from systems that run two small servi
 - **Duplicate detection is literal.** Proposals are matched on case, whitespace and trailing punctuation only. Two differently worded versions of the same rule are both recorded.
 - **Single writer assumptions on SQLite.** One connection guarded by a lock; fine for one server process and a human at the CLI, not for many concurrent writers. Use Postgres for that.
 - **Timestamps are whole seconds, UTC.** The Postgres defaults truncate to the second to match. Rows written by other tools with sub second times can land on the other side of a window boundary than the Python path expects.
-- **What was actually run.** Built and tested against MCP Python SDK 2.3.0 on Python 3.12 (Windows) and Postgres 16 in a local container. The CI workflow is included but has not been executed on a hosted runner, and Python 3.10 and 3.13 have not been tried locally. Only the stdio transport has been exercised.
+- **What was actually run.** Installed into a fresh virtual environment and tested against MCP Python SDK 2.3.0 on Python 3.12 (Windows), with Postgres 16 in a local container. CI runs the offline suite and the demo on Python 3.10, 3.12 and 3.13 and the Postgres suite on Ubuntu. Only the stdio transport has been exercised, and the stdio round trip was made with the SDK's own client. The Claude Code and Claude Desktop entries above follow the current documentation for those hosts; no test in this repository drives either app.
 
 License: MIT, see the LICENSE file.
